@@ -16,4 +16,7 @@ public interface UserRepository extends JpaRepository<PeerEvaluationUser, Intege
 
     List<PeerEvaluationUser> findByEmailIn(Collection<String> emails);
 
+    // FR-SEC-active-account: whether the account behind a bearer token still exists and is active
+    boolean existsByIdAndEnabledTrue(Integer id);
+
 }

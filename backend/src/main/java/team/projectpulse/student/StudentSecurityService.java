@@ -1,13 +1,15 @@
 package team.projectpulse.student;
 
+import team.projectpulse.instructor.Instructor;
 import team.projectpulse.system.UserUtils;
 import jakarta.transaction.Transactional;
 import org.springframework.stereotype.Service;
 
 /**
  * Answers the questions a route asks about one named student: is that student the caller herself
- * ({@code isStudentSelf}), and is the caller an instructor of that student's course section
- * ({@code isCurrentUserInstructorOfStudentSection}).
+ * ({@code isStudentSelf}), is the caller an instructor of that student's course section
+ * ({@code isCurrentUserInstructorOfStudentSection}), and is the caller the course admin of that student's course
+ * ({@code isCurrentUserAdminOfStudentCourse}).
  *
  * <p>Every check fails closed: an id that names no row, or a link not yet established, is denied rather than
  * throwing. These methods run inside an {@code AuthorizationManager}, upstream of the {@code DispatcherServlet},
@@ -45,6 +47,23 @@ public class StudentSecurityService {
         }
         return student.getSection().getInstructors().stream()
                 .anyMatch(instructor -> instructor.getId().equals(instructorIdFromJwt));
+    }
+
+    /**
+     * Whether the caller is the course admin of the course the named student's course section belongs to
+     * (BR-student-lifecycle, BR-section-scoped-access). The course admin need not be assigned to that course section.
+     *
+     * @param studentId the id of the student being accessed, not the caller's id
+     * @return {@code false} for an id that names no student, or a course with no course admin
+     */
+    public boolean isCurrentUserAdminOfStudentCourse(Integer studentId) {
+        Integer callerId = this.userUtils.getUserId();
+        Student student = this.studentRepository.findById(studentId).orElse(null);
+        if (student == null || callerId == null) {
+            return false;
+        }
+        Instructor courseAdmin = student.getSection().getCourse().getCourseAdmin();
+        return courseAdmin != null && callerId.equals(courseAdmin.getId());
     }
 
 }

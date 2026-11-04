@@ -67,6 +67,13 @@ public class EvaluationService {
             throw new PeerEvaluationIllegalArgumentException("The evaluator and evaluatee must be on the same team.");
         }
 
+        // A deactivated student is not evaluated (BR-deactivated-not-evaluated). The form already leaves her out, so
+        // this refuses a crafted request. Editing an evaluation of her submitted before deactivation goes through
+        // updatePeerEvaluation and stays allowed until its window closes.
+        if (!newPeerEvaluation.getEvaluatee().isEnabled()) {
+            throw new PeerEvaluationIllegalArgumentException(newPeerEvaluation.getEvaluatee().getFirstName() + " has been deactivated and can no longer be evaluated.");
+        }
+
         // Make sure this is not a duplicate evaluation
         if (this.evaluationRepository.findByWeekAndEvaluatorIdAndEvaluateeId(newPeerEvaluation.getWeek(), newPeerEvaluation.getEvaluator().getId(), newPeerEvaluation.getEvaluatee().getId()).isPresent()) {
             throw new PeerEvaluationIllegalArgumentException("You have already submitted an evaluation for " + newPeerEvaluation.getEvaluatee().getFirstName() + " in this week.");
@@ -224,9 +231,14 @@ public class EvaluationService {
         List<Student> students = this.studentRepository.findBySectionSectionId(sectionId).stream().filter(student -> student.getTeam() != null).collect(Collectors.toList());
 
         // For each student, compute her average total score, collect all public comments and private comments, and compute rating averages for each criterion.
+        // A deactivated student is listed for a week only if she received at least one peer evaluation that week
+        // (BR-deactivated-not-evaluated). The average already holds one public comment entry per evaluation (null
+        // for an evaluation left without one), so its size is her evaluation count and needs no extra query.
         students.forEach(student -> {
             PeerEvaluationAverage peerEvaluationAverage = getPeerEvaluationAverage(week, student);
-            report.getPeerEvaluationAverages().add(peerEvaluationAverage);
+            if (student.isEnabled() || !peerEvaluationAverage.getPublicComments().isEmpty()) {
+                report.getPeerEvaluationAverages().add(peerEvaluationAverage);
+            }
         });
 
         // Who has not submitted is not part of this report: it is BR-submission-owed, which the notification slice
