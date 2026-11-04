@@ -2,7 +2,11 @@ package team.projectpulse.student;
 
 import tools.jackson.databind.json.JsonMapper;
 import team.projectpulse.AbstractIntegrationTest;
+import team.projectpulse.instructor.Instructor;
+import team.projectpulse.section.Section;
+import team.projectpulse.section.SectionRepository;
 import team.projectpulse.system.StatusCode;
+import team.projectpulse.user.UserRepository;
 import org.hamcrest.Matchers;
 import org.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,6 +30,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultHandlers.print;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @DisplayName("Integration tests for Student API endpoints")
 class StudentIntegrationTest extends AbstractIntegrationTest {
@@ -35,6 +40,15 @@ class StudentIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
     JsonMapper jsonMapper;
+
+    @Autowired
+    StudentRepository studentRepository;
+
+    @Autowired
+    SectionRepository sectionRepository;
+
+    @Autowired
+    UserRepository userRepository;
 
     String adminToken;
 
@@ -305,6 +319,50 @@ class StudentIntegrationTest extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.code").value(StatusCode.FORBIDDEN))
                 .andExpect(jsonPath("$.message").value("No permission."))
                 .andExpect(jsonPath("$.data").value("Access Denied"));
+    }
+
+
+    /**
+     * In the seed data, the course admin b.wei is also assigned to every course section of her course. This takes her
+     * off course section 2 (John's), inside the test's rolled-back transaction, so she is the course admin of John's
+     * course without being assigned to his course section.
+     */
+    private void unassignAdminBingyangFromCourseSection2() {
+        Section section2 = this.sectionRepository.findById(2).orElseThrow();
+        Instructor bingyang = (Instructor) this.userRepository.findByEmail("b.wei@abc.edu").orElseThrow();
+        section2.removeInstructor(bingyang);
+        this.sectionRepository.saveAndFlush(section2);
+    }
+
+    // UC-STU-deactivate-student step 2 (through UC-STU-view-student): the course admin of the student's course may view
+    // her without being assigned to her course section
+    @Test
+    void testCourseAdminNotAssignedToCourseSectionFindsStudentById() throws Exception {
+        unassignAdminBingyangFromCourseSection2();
+
+        this.mockMvc.perform(get(this.baseUrl + "/students/4").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminToken))
+                .andExpect(jsonPath("$.flag").value(true))
+                .andExpect(jsonPath("$.code").value(StatusCode.SUCCESS))
+                .andExpect(jsonPath("$.data.id").value(4));
+    }
+
+    // FR-SEC-active-account: a token issued before deactivation is refused on the next request, reads and writes alike
+    @Test
+    void testStudentJohnsOpenSessionIsRefusedAfterDeactivation() throws Exception {
+        this.studentRepository.deactivateIfActive(4); // John, whose token was issued in setUp
+
+        this.mockMvc.perform(get(this.baseUrl + "/students/4").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.studentJohnToken))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.flag").value(false))
+                .andExpect(jsonPath("$.code").value(StatusCode.UNAUTHORIZED));
+
+        this.mockMvc.perform(post(this.baseUrl + "/activities").contentType(MediaType.APPLICATION_JSON).content("{}").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.studentJohnToken))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value(StatusCode.UNAUTHORIZED));
+
+        // A token of an account that is still active is unaffected
+        this.mockMvc.perform(get(this.baseUrl + "/students/5").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.studentEricToken))
+                .andExpect(jsonPath("$.flag").value(true));
     }
 
 }
