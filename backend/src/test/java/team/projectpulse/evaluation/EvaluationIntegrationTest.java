@@ -9,6 +9,7 @@ import team.projectpulse.evaluation.dto.RatingDto;
 import team.projectpulse.student.StudentRepository;
 import team.projectpulse.system.StatusCode;
 import org.hamcrest.Matchers;
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -26,6 +27,7 @@ import org.springframework.util.MultiValueMap;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -452,13 +454,27 @@ public class EvaluationIntegrationTest extends AbstractIntegrationTest {
     void testWeeklyPeerEvaluationReportListsDeactivatedStudentOnlyIfEvaluated() throws Exception {
         this.studentRepository.deactivateIfActive(4); // John, evaluated in 2023-W31 and not in 2023-W36
 
-        this.mockMvc.perform(get(this.baseUrl + "/evaluations/sections/2/week/2023-W31").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminBingyangToken))
-                .andExpect(jsonPath("$.data.peerEvaluationAverages", Matchers.hasSize(11)))
-                .andExpect(jsonPath("$.data.peerEvaluationAverages[*].studentId", Matchers.hasItem(4)));
+        MvcResult evaluatedWeek = this.mockMvc.perform(get(this.baseUrl + "/evaluations/sections/2/week/2023-W31").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminBingyangToken))
+                .andExpect(jsonPath("$.data.peerEvaluationAverages[*].studentId", Matchers.hasItem(4)))
+                .andReturn();
 
-        this.mockMvc.perform(get(this.baseUrl + "/evaluations/sections/2/week/2023-W36").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminBingyangToken))
-                .andExpect(jsonPath("$.data.peerEvaluationAverages", Matchers.hasSize(10))) // Active students with none are still listed
-                .andExpect(jsonPath("$.data.peerEvaluationAverages[*].studentId", Matchers.not(Matchers.hasItem(4))));
+        MvcResult notEvaluatedWeek = this.mockMvc.perform(get(this.baseUrl + "/evaluations/sections/2/week/2023-W36").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminBingyangToken))
+                .andExpect(jsonPath("$.data.peerEvaluationAverages[*].studentId", Matchers.not(Matchers.hasItem(4))))
+                .andReturn();
+
+        // Active students are listed every week, evaluated or not, so John is the only difference between the two weeks
+        List<Integer> expectedStudentIds = reportStudentIds(evaluatedWeek);
+        expectedStudentIds.remove(Integer.valueOf(4));
+        assertThat(reportStudentIds(notEvaluatedWeek)).containsExactlyInAnyOrderElementsOf(expectedStudentIds);
+    }
+
+    private List<Integer> reportStudentIds(MvcResult report) throws Exception {
+        JSONArray averages = new JSONObject(report.getResponse().getContentAsString()).getJSONObject("data").getJSONArray("peerEvaluationAverages");
+        List<Integer> studentIds = new ArrayList<>();
+        for (int i = 0; i < averages.length(); i++) {
+            studentIds.add(averages.getJSONObject(i).getInt("studentId"));
+        }
+        return studentIds;
     }
 
     @Test

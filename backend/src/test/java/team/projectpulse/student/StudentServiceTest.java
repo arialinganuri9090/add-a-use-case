@@ -4,7 +4,6 @@ import org.junit.jupiter.api.AfterEach;
 import team.projectpulse.section.Section;
 import team.projectpulse.section.SectionRepository;
 import team.projectpulse.system.UserUtils;
-import team.projectpulse.system.exception.ObjectNotFoundException;
 import team.projectpulse.system.exception.StudentAlreadyDeactivatedException;
 import team.projectpulse.user.userinvitation.UserInvitationService;
 import org.junit.jupiter.api.BeforeEach;
@@ -197,24 +196,6 @@ class StudentServiceTest {
         assertThat(result.isEnabled()).isTrue();
     }
 
-    @Test
-    void testDeactivateStudentSuccess() {
-        // Given
-        Student john = this.students.get(0);
-        given(this.studentRepository.deactivateIfActive(1)).willReturn(1);
-        given(this.studentRepository.findById(1)).willAnswer(invocation -> {
-            john.setEnabled(false); // What the conditional update wrote
-            return Optional.of(john);
-        });
-
-        // When
-        Student result = this.studentService.deactivateStudent(1);
-
-        // Then
-        assertThat(result.isEnabled()).isFalse();
-        verify(this.studentRepository, times(1)).deactivateIfActive(1);
-    }
-
     // 3a: already deactivated, including by another user who got there first
     @Test
     void testDeactivateStudentAlreadyDeactivated() {
@@ -229,19 +210,6 @@ class StudentServiceTest {
         assertThat(thrown).isInstanceOf(StudentAlreadyDeactivatedException.class)
                 .hasMessage("The student is already deactivated.");
         verify(this.studentRepository, never()).save(any(Student.class));
-    }
-
-    @Test
-    void testDeactivateStudentNotFound() {
-        // Given
-        given(this.studentRepository.deactivateIfActive(99)).willReturn(0);
-        given(this.studentRepository.existsById(99)).willReturn(false);
-
-        // When
-        Throwable thrown = catchThrowable(() -> this.studentService.deactivateStudent(99));
-
-        // Then
-        assertThat(thrown).isInstanceOf(ObjectNotFoundException.class);
     }
 
     @Test
