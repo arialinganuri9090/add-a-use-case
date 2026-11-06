@@ -2,7 +2,11 @@ package team.projectpulse.student;
 
 import tools.jackson.databind.json.JsonMapper;
 import team.projectpulse.AbstractIntegrationTest;
+import team.projectpulse.instructor.Instructor;
+import team.projectpulse.section.Section;
+import team.projectpulse.section.SectionRepository;
 import team.projectpulse.system.StatusCode;
+import team.projectpulse.user.UserRepository;
 import org.hamcrest.Matchers;
 import org.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,11 +25,13 @@ import org.springframework.util.MultiValueMap;
 import java.util.HashMap;
 import java.util.Map;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.httpBasic;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultHandlers.print;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @DisplayName("Integration tests for Student API endpoints")
 class StudentIntegrationTest extends AbstractIntegrationTest {
@@ -35,6 +41,15 @@ class StudentIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
     JsonMapper jsonMapper;
+
+    @Autowired
+    StudentRepository studentRepository;
+
+    @Autowired
+    SectionRepository sectionRepository;
+
+    @Autowired
+    UserRepository userRepository;
 
     String adminToken;
 
@@ -305,6 +320,158 @@ class StudentIntegrationTest extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.code").value(StatusCode.FORBIDDEN))
                 .andExpect(jsonPath("$.message").value("No permission."))
                 .andExpect(jsonPath("$.data").value("Access Denied"));
+    }
+
+
+    /**
+     * In the seed data, the course admin b.wei is also assigned to every course section of her course. This takes her
+     * off course section 2 (John's), inside the test's rolled-back transaction, so she is the course admin of John's
+     * course without being assigned to his course section.
+     */
+    private void unassignAdminBingyangFromCourseSection2() {
+        Section section2 = this.sectionRepository.findById(2).orElseThrow();
+        Instructor bingyang = (Instructor) this.userRepository.findByEmail("b.wei@abc.edu").orElseThrow();
+        section2.removeInstructor(bingyang);
+        this.sectionRepository.saveAndFlush(section2);
+    }
+
+    // UC-STU-deactivate-student step 2 (through UC-STU-view-student): the course admin of the student's course may view
+    // her without being assigned to her course section
+    @Test
+    void testCourseAdminNotAssignedToCourseSectionFindsStudentById() throws Exception {
+        unassignAdminBingyangFromCourseSection2();
+
+        this.mockMvc.perform(get(this.baseUrl + "/students/4").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminToken))
+                .andExpect(jsonPath("$.flag").value(true))
+                .andExpect(jsonPath("$.code").value(StatusCode.SUCCESS))
+                .andExpect(jsonPath("$.data.id").value(4));
+    }
+
+    // FR-SEC-active-account: a token issued before deactivation is refused on the next request, reads and writes alike
+    @Test
+    void testStudentJohnsOpenSessionIsRefusedAfterDeactivation() throws Exception {
+        this.studentRepository.deactivateIfActive(4); // John, whose token was issued in setUp
+
+        this.mockMvc.perform(get(this.baseUrl + "/students/4").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.studentJohnToken))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.flag").value(false))
+                .andExpect(jsonPath("$.code").value(StatusCode.UNAUTHORIZED));
+
+        this.mockMvc.perform(post(this.baseUrl + "/activities").contentType(MediaType.APPLICATION_JSON).content("{}").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.studentJohnToken))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value(StatusCode.UNAUTHORIZED));
+
+        // A token of an account that is still active is unaffected
+        this.mockMvc.perform(get(this.baseUrl + "/students/5").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.studentEricToken))
+                .andExpect(jsonPath("$.flag").value(true));
+    }
+
+    private String studentJson(String username, String firstName, String lastName, String email, boolean enabled) throws Exception {
+        Map<String, Object> studentDto = new HashMap<>();
+        studentDto.put("username", username);
+        studentDto.put("firstName", firstName);
+        studentDto.put("lastName", lastName);
+        studentDto.put("email", email);
+        studentDto.put("enabled", enabled);
+        return this.jsonMapper.writeValueAsString(studentDto);
+    }
+
+    // UC-STU-deactivate-student main flow: an instructor assigned to the course section deactivates an active student
+    @Test
+    void testInstructorBillDeactivatesStudentJohn() throws Exception {
+        this.mockMvc.perform(patch(this.baseUrl + "/students/4/deactivate").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.instructorBillToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.flag").value(true))
+                .andExpect(jsonPath("$.code").value(StatusCode.SUCCESS))
+                .andExpect(jsonPath("$.message").value("Deactivate student successfully"))
+                .andExpect(jsonPath("$.data.id").value(4))
+                .andExpect(jsonPath("$.data.enabled").value(false))
+                // She keeps her course section and team (BR-student-lifecycle)
+                .andExpect(jsonPath("$.data.sectionName").value("2023-2024"))
+                .andExpect(jsonPath("$.data.teamName").value("Team1"));
+
+        // Her next login is refused
+        this.mockMvc.perform(post(this.baseUrl + "/users/login").with(httpBasic("j.smith@abc.edu", "123456")))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value(StatusCode.UNAUTHORIZED));
+    }
+
+    // Main flow: the course admin of the student's course, not assigned to her course section, views and deactivates her
+    @Test
+    void testCourseAdminNotAssignedToCourseSectionViewsAndDeactivatesStudent() throws Exception {
+        unassignAdminBingyangFromCourseSection2();
+
+        this.mockMvc.perform(get(this.baseUrl + "/students/4").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminToken))
+                .andExpect(jsonPath("$.code").value(StatusCode.SUCCESS));
+        this.mockMvc.perform(patch(this.baseUrl + "/students/4/deactivate").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminToken))
+                .andExpect(jsonPath("$.code").value(StatusCode.SUCCESS))
+                .andExpect(jsonPath("$.data.enabled").value(false));
+    }
+
+    // 3a: the student is already deactivated, including by another user who got there first
+    @Test
+    void testDeactivateStudentAlreadyDeactivated() throws Exception {
+        this.mockMvc.perform(patch(this.baseUrl + "/students/4/deactivate").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminToken))
+                .andExpect(jsonPath("$.code").value(StatusCode.SUCCESS));
+
+        this.mockMvc.perform(patch(this.baseUrl + "/students/4/deactivate").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.instructorBillToken))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.flag").value(false))
+                .andExpect(jsonPath("$.code").value(StatusCode.CONFLICT))
+                .andExpect(jsonPath("$.message").value("The student is already deactivated."));
+
+        assertThat(this.studentRepository.findById(4).orElseThrow().isEnabled()).isFalse();
+    }
+
+    // 3b: neither the course admin of her course nor an instructor assigned to her course section
+    @Test
+    void testAdminTimCannotDeactivateStudentOutsideHerCourse() throws Exception {
+        this.mockMvc.perform(patch(this.baseUrl + "/students/4/deactivate").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminTimToken))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value(StatusCode.FORBIDDEN));
+        this.mockMvc.perform(get(this.baseUrl + "/students/4").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminTimToken))
+                .andExpect(status().isForbidden());
+
+        assertThat(this.studentRepository.findById(4).orElseThrow().isEnabled()).isTrue();
+    }
+
+    // 3b: the student herself may not deactivate her own account
+    @Test
+    void testStudentJohnCannotDeactivateHimself() throws Exception {
+        this.mockMvc.perform(patch(this.baseUrl + "/students/4/deactivate").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.studentJohnToken))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value(StatusCode.FORBIDDEN));
+
+        assertThat(this.studentRepository.findById(4).orElseThrow().isEnabled()).isTrue();
+    }
+
+    // 3b: an id that names no student (an unknown id, an instructor's id, a non-numeric id) is refused at the route
+    @Test
+    void testDeactivateIdThatNamesNoStudent() throws Exception {
+        for (String id : new String[]{"9999", "1", "abc"}) {
+            this.mockMvc.perform(patch(this.baseUrl + "/students/" + id + "/deactivate").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminToken))
+                    .andExpect(status().isForbidden());
+        }
+    }
+
+    // The generic update can only turn enabled on: deactivation needs the confirmed path
+    @Test
+    void testInstructorBillCannotDeactivateThroughUpdate() throws Exception {
+        this.mockMvc.perform(put(this.baseUrl + "/students/4").contentType(MediaType.APPLICATION_JSON).content(studentJson("j.smith@abc.edu", "John", "Smith", "j.smith@abc.edu", false)).accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.instructorBillToken))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value(StatusCode.INVALID_ARGUMENT))
+                .andExpect(jsonPath("$.message").value("Use Deactivate to deactivate a student."));
+
+        assertThat(this.studentRepository.findById(4).orElseThrow().isEnabled()).isTrue();
+    }
+
+    @Test
+    void testInstructorBillReactivatesThroughUpdate() throws Exception {
+        this.studentRepository.deactivateIfActive(4);
+
+        this.mockMvc.perform(put(this.baseUrl + "/students/4").contentType(MediaType.APPLICATION_JSON).content(studentJson("j.smith@abc.edu", "John", "Smith", "j.smith@abc.edu", true)).accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.instructorBillToken))
+                .andExpect(jsonPath("$.code").value(StatusCode.SUCCESS))
+                .andExpect(jsonPath("$.data.enabled").value(true));
     }
 
 }

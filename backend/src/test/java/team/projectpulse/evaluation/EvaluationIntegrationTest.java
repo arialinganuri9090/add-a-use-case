@@ -6,8 +6,10 @@ import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import team.projectpulse.AbstractIntegrationTest;
 import team.projectpulse.evaluation.dto.PeerEvaluationDto;
 import team.projectpulse.evaluation.dto.RatingDto;
+import team.projectpulse.student.StudentRepository;
 import team.projectpulse.system.StatusCode;
 import org.hamcrest.Matchers;
+import org.json.JSONArray;
 import org.json.JSONObject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -25,6 +27,7 @@ import org.springframework.util.MultiValueMap;
 import java.time.Clock;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -33,6 +36,7 @@ import static org.springframework.security.test.web.servlet.request.SecurityMock
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultHandlers.print;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 @DisplayName("Integration tests for Evaluation API endpoints")
 public class EvaluationIntegrationTest extends AbstractIntegrationTest {
@@ -58,6 +62,9 @@ public class EvaluationIntegrationTest extends AbstractIntegrationTest {
 
     @Autowired
     EntityManager entityManager;
+
+    @Autowired
+    StudentRepository studentRepository;
 
     String adminBingyangToken;
 
@@ -407,6 +414,67 @@ public class EvaluationIntegrationTest extends AbstractIntegrationTest {
                 .andExpect(jsonPath("$.data.peerEvaluationAverages[0].lastName").value("Smith"))
                 .andExpect(jsonPath("$.data.peerEvaluationAverages[0].averageTotalScore").value(Matchers.closeTo(51.33, 0.01)))
                 .andExpect(jsonPath("$.data.studentsMissingPeerEvaluations").doesNotExist()); // Now GET /sections/{sectionId}/submission-status
+    }
+
+    // BR-deactivated-not-evaluated: a new evaluation of a deactivated teammate is refused; an active one is still accepted
+    @Test
+    void testStudentJohnCannotEvaluateDeactivatedTeammate() throws Exception {
+        List<RatingDto> ratingDtos = List.of(
+                new RatingDto(null, 1, 4.0),
+                new RatingDto(null, 2, 9.0),
+                new RatingDto(null, 3, 7.0),
+                new RatingDto(null, 4, 10.0),
+                new RatingDto(null, 5, 5.0),
+                new RatingDto(null, 6, 6.0)
+        );
+
+        LocalDate fixedDate = LocalDate.of(2023, 9, 15); // 2023-W37, so 2023-W36 is open
+        Clock fixedClock = Clock.fixed(fixedDate.atStartOfDay(ZoneId.systemDefault()).toInstant(), ZoneId.systemDefault());
+        given(this.clock.instant()).willReturn(fixedClock.instant());
+        given(this.clock.getZone()).willReturn(fixedClock.getZone());
+
+        this.studentRepository.deactivateIfActive(5); // Eric
+
+        String ofEric = this.jsonMapper.writeValueAsString(new PeerEvaluationDto(null, "2023-W36", 4, "John Smith", 5, "Eric Hudson", ratingDtos, 41.0, "Good job", "Keep it up", null, null));
+        this.mockMvc.perform(post(this.baseUrl + "/evaluations").contentType(MediaType.APPLICATION_JSON).content(ofEric).accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.studentJohnToken))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.flag").value(false))
+                .andExpect(jsonPath("$.code").value(StatusCode.INVALID_ARGUMENT))
+                .andExpect(jsonPath("$.message").value("Eric has been deactivated and can no longer be evaluated."));
+        assertThat(this.evaluationRepository.findByWeekAndEvaluatorIdAndEvaluateeId("2023-W36", 4, 5)).isEmpty();
+
+        String ofJerry = this.jsonMapper.writeValueAsString(new PeerEvaluationDto(null, "2023-W36", 4, "John Smith", 6, "Jerry Moon", ratingDtos, 41.0, "Good job", "Keep it up", null, null));
+        this.mockMvc.perform(post(this.baseUrl + "/evaluations").contentType(MediaType.APPLICATION_JSON).content(ofJerry).accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.studentJohnToken))
+                .andExpect(jsonPath("$.flag").value(true))
+                .andExpect(jsonPath("$.code").value(StatusCode.SUCCESS));
+    }
+
+    // BR-deactivated-not-evaluated: the section report lists a deactivated student only for a week she was evaluated in
+    @Test
+    void testWeeklyPeerEvaluationReportListsDeactivatedStudentOnlyIfEvaluated() throws Exception {
+        this.studentRepository.deactivateIfActive(4); // John, evaluated in 2023-W31 and not in 2023-W36
+
+        MvcResult evaluatedWeek = this.mockMvc.perform(get(this.baseUrl + "/evaluations/sections/2/week/2023-W31").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminBingyangToken))
+                .andExpect(jsonPath("$.data.peerEvaluationAverages[*].studentId", Matchers.hasItem(4)))
+                .andReturn();
+
+        MvcResult notEvaluatedWeek = this.mockMvc.perform(get(this.baseUrl + "/evaluations/sections/2/week/2023-W36").accept(MediaType.APPLICATION_JSON).header(HttpHeaders.AUTHORIZATION, this.adminBingyangToken))
+                .andExpect(jsonPath("$.data.peerEvaluationAverages[*].studentId", Matchers.not(Matchers.hasItem(4))))
+                .andReturn();
+
+        // Active students are listed every week, evaluated or not, so John is the only difference between the two weeks
+        List<Integer> expectedStudentIds = reportStudentIds(evaluatedWeek);
+        expectedStudentIds.remove(Integer.valueOf(4));
+        assertThat(reportStudentIds(notEvaluatedWeek)).containsExactlyInAnyOrderElementsOf(expectedStudentIds);
+    }
+
+    private List<Integer> reportStudentIds(MvcResult report) throws Exception {
+        JSONArray averages = new JSONObject(report.getResponse().getContentAsString()).getJSONObject("data").getJSONArray("peerEvaluationAverages");
+        List<Integer> studentIds = new ArrayList<>();
+        for (int i = 0; i < averages.length(); i++) {
+            studentIds.add(averages.getJSONObject(i).getInt("studentId"));
+        }
+        return studentIds;
     }
 
     @Test

@@ -43,3 +43,151 @@ describe('Peer Evaluation Menu Test', () => {
     cy.contains('Submit Peer Evaluations').should('be.visible') // Adjust the page content check
   })
 })
+
+// BR-deactivated-not-evaluated (UC-STU-deactivate-student): the submit form leaves a deactivated teammate out of a new
+// submission, but an evaluation of her submitted before deactivation stays listed and editable. The API is stubbed;
+// EvaluationIntegrationTest covers the server refusing a new evaluation of her.
+describe('Peer evaluation form and a deactivated teammate', () => {
+  const ok = (data) => ({ flag: true, code: 200, message: 'OK', data })
+  const teammates = [
+    {
+      id: 4,
+      firstName: 'John',
+      lastName: 'Smith',
+      email: 'j.smith@abc.edu',
+      username: 'j.smith@abc.edu',
+      enabled: true
+    },
+    {
+      id: 5,
+      firstName: 'Eric',
+      lastName: 'Hudson',
+      email: 'e.hudson@abc.edu',
+      username: 'e.hudson@abc.edu',
+      enabled: false
+    },
+    {
+      id: 6,
+      firstName: 'Jerry',
+      lastName: 'Moon',
+      email: 'j.moon@abc.edu',
+      username: 'j.moon@abc.edu',
+      enabled: true
+    }
+  ]
+  const criterion = {
+    criterionId: 1,
+    criterion: 'Quality of work',
+    description: 'Quality',
+    maxScore: 10
+  }
+
+  beforeEach(() => {
+    cy.login('j.smith@abc.edu', '123456')
+    cy.intercept('GET', '**/students/teams/*', { body: ok(teammates) })
+    cy.intercept('GET', '**/sections/*', {
+      body: ok({ sectionId: 2, sectionName: '2023-2024', rubricId: 1 })
+    })
+    cy.intercept('GET', '**/rubrics/*', {
+      body: ok({ rubricId: 1, name: 'Rubric', criteria: [criterion] })
+    })
+  })
+
+  it('gives no row to a deactivated teammate in a new submission', () => {
+    cy.intercept('GET', '**/evaluations/evaluators/*/week/*', { body: ok([]) }).as('existing')
+
+    cy.visit('/evaluations/submit-evaluations')
+    cy.wait('@existing')
+
+    cy.get('.el-table')
+      .should('contain', 'John Smith')
+      .and('contain', 'Jerry Moon')
+      .and('not.contain', 'Eric Hudson')
+    cy.get('[data-cy=evaluation-submit]').should('exist')
+  })
+
+  it('shows the server message, stops loading and reloads the form when a submit fails', () => {
+    const refused = 'Jerry has been deactivated and can no longer be evaluated.'
+    cy.intercept('GET', '**/evaluations/evaluators/*/week/*', { body: ok([]) }).as('existing')
+    cy.intercept('POST', '**/evaluations', {
+      statusCode: 400,
+      body: { flag: false, code: 400, message: refused }
+    }).as('submit')
+    cy.intercept('POST', '**/evaluations/**', { body: ok(null) }).as('email')
+
+    cy.visit('/evaluations/submit-evaluations')
+    cy.wait('@existing')
+    cy.get('.el-table').should('contain', 'Jerry Moon')
+
+    // From here the reload finds Jerry deactivated
+    cy.intercept('GET', '**/students/teams/*', {
+      body: ok(teammates.map((t) => ({ ...t, enabled: t.id === 4 })))
+    }).as('reloadedTeammates')
+    cy.get('[data-cy=evaluation-submit]').click()
+
+    cy.wait('@submit')
+    cy.contains(refused)
+    cy.wait('@reloadedTeammates')
+    cy.get('.el-table').should('contain', 'John Smith').and('not.contain', 'Jerry Moon')
+    cy.get('[data-cy=evaluation-submit]').should('not.have.class', 'is-loading')
+    cy.get('@email.all').should('have.length', 0)
+  })
+
+  it('keeps the form and stops loading when an update fails', () => {
+    const existing = [
+      {
+        evaluationId: 100,
+        week: '2023-W31',
+        evaluatorId: 4,
+        evaluateeId: 4,
+        evaluateeName: 'John Smith',
+        ratings: [{ ratingId: 200, criterionId: 1, actualScore: 8 }],
+        publicComment: '',
+        privateComment: ''
+      }
+    ]
+    const refused = 'The evaluation window has closed.'
+    cy.intercept('GET', '**/evaluations/evaluators/*/week/*', { body: ok(existing) }).as('existing')
+    cy.intercept('PUT', '**/evaluations/*', {
+      statusCode: 400,
+      body: { flag: false, code: 400, message: refused }
+    }).as('update')
+
+    cy.visit('/evaluations/submit-evaluations')
+    cy.wait('@existing')
+    cy.get('[data-cy=evaluation-update]').click()
+
+    cy.wait('@update')
+    cy.contains(refused)
+    cy.get('.el-table').should('contain', 'John Smith')
+    cy.get('[data-cy=evaluation-update]').should('not.have.class', 'is-loading')
+  })
+
+  it('lists an evaluation of her submitted before deactivation, and Update sends a PUT for it', () => {
+    const existing = [4, 5, 6].map((id, i) => ({
+      evaluationId: 100 + i,
+      week: '2023-W31',
+      evaluatorId: 4,
+      evaluateeId: id,
+      evaluateeName: teammates[i].firstName + ' ' + teammates[i].lastName,
+      ratings: [{ ratingId: 200 + i, criterionId: 1, actualScore: 8 }],
+      publicComment: '',
+      privateComment: ''
+    }))
+    cy.intercept('GET', '**/evaluations/evaluators/*/week/*', { body: ok(existing) }).as('existing')
+    cy.intercept('PUT', '**/evaluations/*', (req) => req.reply(ok(req.body))).as('update')
+
+    cy.visit('/evaluations/submit-evaluations')
+    cy.wait('@existing')
+
+    cy.get('.el-table').should('contain', 'Eric Hudson')
+    cy.get('[data-cy=evaluation-update]').click()
+
+    cy.get('@update.all').should('have.length', 3)
+    cy.get('@update.all').then((calls) => {
+      expect(calls.map((c) => c.request.url)).to.satisfy((urls) =>
+        urls.some((u) => u.endsWith('/evaluations/101'))
+      )
+    })
+  })
+})

@@ -106,12 +106,18 @@
     <div style="display: flex; justify-content: flex-end">
       <el-button
         type="primary"
+        data-cy="evaluation-submit"
         @click="submitPeerEvaluations"
         v-if="isNewSubmission"
         :loading="isLoading"
         >Submit</el-button
       >
-      <el-button type="warning" @click="updatePeerEvaluations" :loading="isLoading" v-else
+      <el-button
+        type="warning"
+        data-cy="evaluation-update"
+        @click="updatePeerEvaluations"
+        :loading="isLoading"
+        v-else
         >Update</el-button
       >
     </div>
@@ -207,55 +213,84 @@ async function prepareStartingPeerEvaluations() {
     peerEvalutions.value = result.data
     isNewSubmission = false
   } else {
-    // If not, create a new set of evaluations
+    // If not, create a new set of evaluations, one per active teammate: a deactivated teammate is not evaluated
+    // (BR-deactivated-not-evaluated). The branch above still lists an evaluation of her submitted before she was
+    // deactivated, which stays editable through PUT until the window closes.
     isNewSubmission = true
-    peerEvalutions.value = students.value.map((student) => ({
-      week: previousWeek.value,
-      evaluatorId: (userInfoStore.userInfo as Student).id as number,
-      evaluateeId: student.id as number,
-      evaluateeName: `${student.firstName} ${student.lastName}`,
-      ratings: criteria.value.map((criterion) => ({
-        criterionId: criterion.criterionId as number,
-        criterion: criterion.criterion,
-        actualScore: 10 // Default score, can be changed by the user
-      })),
-      publicComment: '',
-      privateComment: ''
-    }))
+    peerEvalutions.value = students.value
+      .filter((student) => student.enabled === true)
+      .map((student) => ({
+        week: previousWeek.value,
+        evaluatorId: (userInfoStore.userInfo as Student).id as number,
+        evaluateeId: student.id as number,
+        evaluateeName: `${student.firstName} ${student.lastName}`,
+        ratings: criteria.value.map((criterion) => ({
+          criterionId: criterion.criterionId as number,
+          criterion: criterion.criterion,
+          actualScore: 10 // Default score, can be changed by the user
+        })),
+        publicComment: '',
+        privateComment: ''
+      }))
   }
 }
 
 // Submit peer evaluations
 async function submitPeerEvaluations() {
   if (peerEvalutions.value) {
-    const submitPromises = peerEvalutions.value.map(async (evaluation) => {
-      const result: SubmitPeerEvaluationResponse = await submitEvaluation(evaluation)
-      return result.data
-    })
     isLoading.value = true
-    peerEvalutions.value = await Promise.all(submitPromises) // Wait for all promises to resolve
-    isNewSubmission = false // Change to update mode
-    ElMessage.success('Peer evaluations submitted successfully')
-    isLoading.value = false
+    let submitted = false
+    try {
+      // Wait for every request, not just the first failure, so the reload below sees all that were saved
+      const results = await Promise.allSettled(
+        peerEvalutions.value.map(
+          (evaluation): Promise<SubmitPeerEvaluationResponse> => submitEvaluation(evaluation)
+        )
+      )
+      const saved = results.flatMap((result) =>
+        result.status === 'fulfilled' ? [result.value.data] : []
+      )
+      if (saved.length === results.length) {
+        peerEvalutions.value = saved
+        isNewSubmission = false // Change to update mode
+        submitted = true
+        ElMessage.success('Peer evaluations submitted successfully')
+      } else {
+        // The request instance has already shown the server's message. Reload the teammates too: the usual cause is a
+        // teammate deactivated since the form was loaded (BR-deactivated-not-evaluated), and a retry would fail the same way.
+        await loadStudents()
+        await prepareStartingPeerEvaluations()
+      }
+    } catch {
+      // The reload failed, and the request instance has already reported that too
+    } finally {
+      isLoading.value = false
+    }
 
-    // Send an submission confirmation email to the submitter
-    await sendPeerEvaluationSubmissionConfirmationEmail(previousWeekRange.value)
-    ElMessage.success('A confirmation email has been sent to you.')
+    if (submitted) {
+      // Send an submission confirmation email to the submitter
+      await sendPeerEvaluationSubmissionConfirmationEmail(previousWeekRange.value)
+      ElMessage.success('A confirmation email has been sent to you.')
+    }
   }
 }
 
 // Update peer evaluations
 async function updatePeerEvaluations() {
   if (peerEvalutions.value) {
-    const submitPromises = peerEvalutions.value.map(async (evaluation) => {
-      const result: UpdatePeerEvaluationResponse = await updateEvaluation(evaluation)
-      return result.data
-    })
-
     isLoading.value = true
-    peerEvalutions.value = await Promise.all(submitPromises) // Wait for all promises to resolve
-    ElMessage.success('Peer evaluations updated successfully')
-    isLoading.value = false
+    try {
+      const submitPromises = peerEvalutions.value.map(async (evaluation) => {
+        const result: UpdatePeerEvaluationResponse = await updateEvaluation(evaluation)
+        return result.data
+      })
+      peerEvalutions.value = await Promise.all(submitPromises) // Wait for all promises to resolve
+      ElMessage.success('Peer evaluations updated successfully')
+    } catch {
+      // The request instance has already shown the server's message; the form keeps the edits for a retry
+    } finally {
+      isLoading.value = false
+    }
   }
 }
 </script>
