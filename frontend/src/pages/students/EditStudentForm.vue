@@ -106,18 +106,21 @@ const rules = {
   ]
 }
 
+function showStudent(student: Student) {
+  studentBeingEdited.value.id = student.id as number
+  studentBeingEdited.value.username = student.username
+  studentBeingEdited.value.enabled = student.enabled
+  studentBeingEdited.value.firstName = student.firstName
+  studentBeingEdited.value.lastName = student.lastName
+  studentBeingEdited.value.email = student.email
+  studentBeingEdited.value.teamName = student.teamName
+  loadedAsActive.value = student.enabled === true
+}
+
 async function loadStudent(studentId: number) {
   // Load the user to be edited
   const result = await findStudentById(studentId)
-
-  studentBeingEdited.value.id = result.data.id as number
-  studentBeingEdited.value.username = result.data.username
-  studentBeingEdited.value.enabled = result.data.enabled
-  studentBeingEdited.value.firstName = result.data.firstName
-  studentBeingEdited.value.lastName = result.data.lastName
-  studentBeingEdited.value.email = result.data.email
-  studentBeingEdited.value.teamName = result.data.teamName
-  loadedAsActive.value = result.data.enabled === true
+  showStudent(result.data)
 }
 
 onMounted(() => {
@@ -178,12 +181,13 @@ async function confirmDeactivation() {
   }
 
   try {
-    await deactivateStudent(studentBeingEdited.value.id as number)
+    const result = await deactivateStudent(studentBeingEdited.value.id as number)
+    showStudent(result.data)
     ElMessage.success('The student has been deactivated.')
   } catch {
-    // 3a/3b: already reported by the request instance; fall through to reload the student
+    // 3a/3b: already reported by the request instance, and a refusal carries no student, so reload her
+    await loadStudent(studentBeingEdited.value.id as number)
   }
-  await loadStudent(studentBeingEdited.value.id as number)
   emit('student-changed')
 }
 </script>

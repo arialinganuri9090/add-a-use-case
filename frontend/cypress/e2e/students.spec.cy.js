@@ -68,16 +68,15 @@ describe('Deactivate a student', () => {
     openEditDialog()
 
     cy.get('[data-cy=deactivate-student]').click()
-    // From here the student reloads as deactivated
-    cy.intercept('GET', '**/students/4', { body: result({ ...john, enabled: false }) }).as('reloaded')
     cy.get('.deactivate-confirm').click()
 
     cy.wait('@deactivate')
     cy.contains('The student has been deactivated.')
-    cy.wait('@reloaded')
     cy.get('[data-cy=deactivate-student]').should('not.exist')
     cy.get('[data-cy=student-status-switch]').should('exist')
     cy.get('@deactivate.all').should('have.length', 1)
+    cy.get('@search.all').should('have.length', 2) // student-changed reloaded the list
+    cy.get('@student.all').should('have.length', 1) // The dialog used the PATCH response, not a second GET
   })
 
   it('shows the server message and reloads when the student was already deactivated (3a)', () => {
