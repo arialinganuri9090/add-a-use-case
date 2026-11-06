@@ -1,6 +1,5 @@
 package team.projectpulse.student;
 
-import team.projectpulse.instructor.Instructor;
 import team.projectpulse.system.UserUtils;
 import jakarta.transaction.Transactional;
 import org.springframework.stereotype.Service;
@@ -54,7 +53,7 @@ public class StudentSecurityService {
      * (BR-student-lifecycle, BR-section-scoped-access). The course admin need not be assigned to that course section.
      *
      * @param studentId the id of the student being accessed, not the caller's id
-     * @return {@code false} for an id that names no student, or a course with no course admin
+     * @return {@code false} for an id that names no student
      */
     public boolean isCurrentUserAdminOfStudentCourse(Integer studentId) {
         Integer callerId = this.userUtils.getUserId();
@@ -62,8 +61,7 @@ public class StudentSecurityService {
         if (student == null || callerId == null) {
             return false;
         }
-        Instructor courseAdmin = student.getSection().getCourse().getCourseAdmin();
-        return courseAdmin != null && callerId.equals(courseAdmin.getId());
+        return callerId.equals(student.getSection().getCourse().getCourseAdmin().getId());
     }
 
 }
